@@ -20,23 +20,83 @@ import android.app.Application
 import android.content.ContentResolver
 import android.content.Context
 import android.net.Uri
+import androidx.lifecycle.LiveData
+import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
+import androidx.work.*
+import com.example.background.workers.BlurWorker
+import com.example.background.workers.CleanupWorker
+import com.example.background.workers.SaveImageToFileWorker
 
 
 class BlurViewModel(application: Application) : ViewModel() {
 
-    internal var imageUri: Uri? = null
+    private var imageUri: Uri? = null
     internal var outputUri: Uri? = null
-
+    private val workerManager = WorkManager.getInstance(application)
+    // New instance variable for the WorkInfo
+    internal val outputWorkInfos: LiveData<List<WorkInfo>>
     init {
         imageUri = getImageUri(application.applicationContext)
+        outputWorkInfos = workerManager.getWorkInfosByTagLiveData(TAG_OUTPUT)
     }
+
+    internal fun cancelWork() {
+        workerManager.cancelUniqueWork(IMAGE_MANIPULATION_WORK_NAME)
+    }
+
     /**
      * Create the WorkRequest to apply the blur and save the resulting image
      * @param blurLevel The amount to blur the image
      */
-    internal fun applyBlur(blurLevel: Int) {}
+    internal fun applyBlur(blurLevel: Int) {
+        // Add WorkRequest to Cleanup temporary images
+        /*var continuation = workerManager
+            .beginWith(
+                OneTimeWorkRequest
+                    .from(CleanupWorker::class.java)
+            )*/
+
+        var continuation = workerManager
+            .beginUniqueWork(
+                IMAGE_MANIPULATION_WORK_NAME,
+                ExistingWorkPolicy.REPLACE,
+                OneTimeWorkRequest.from(CleanupWorker::class.java)
+            )
+
+        // Add WorkRequest to blur the image
+        for (i in 0 until blurLevel) {
+            val blurRequest = OneTimeWorkRequestBuilder<BlurWorker>()
+            if (i == 0) {
+                blurRequest.setInputData(createInputDataForUri())
+            }
+            continuation = continuation.then(blurRequest.build())
+        }
+
+        // Put this inside the applyBlur() function, above the save work request.
+// Create charging constraint
+        val constraints = Constraints.Builder()
+            .setRequiresCharging(true)
+            .build()
+
+//        Add WorkRequest to save the image to the filesystem
+        val save = OneTimeWorkRequest.Builder(SaveImageToFileWorker::class.java)
+            .setConstraints(constraints)
+            .addTag(TAG_OUTPUT)
+            .build()
+        continuation = continuation.then(save)
+
+        continuation.enqueue()
+    }
+
+    private fun createInputDataForUri(): Data {
+        val builder = Data.Builder()
+        imageUri?.let {
+            builder.putString(KEY_IMAGE_URI, imageUri.toString())
+        }
+        return builder.build()
+    }
 
     private fun uriOrNull(uriString: String?): Uri? {
         return if (!uriString.isNullOrEmpty()) {
